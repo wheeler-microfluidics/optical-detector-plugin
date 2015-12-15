@@ -18,7 +18,10 @@ along with optical_detector_plugin.  If not, see <http://www.gnu.org/licenses/>.
 """
 import warnings
 import logging
+from datetime import datetime
 
+import gobject
+import gtk
 import pandas as pd
 from path_helpers import path
 from pulse_counter_rpc import SerialProxy
@@ -60,6 +63,9 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
             config file, in a section named after this plugin's name attribute
     '''
     AppFields = Form.of(
+        # Timeout
+        Integer.named('dmf_control_timeout_ms').using(optional=True,
+                                                      default=5000),
         # Pulse counting pin
         Integer.named('pulse_count_pin').using(optional=True, default=2),
         # Multiplexer channels
@@ -73,7 +79,7 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         Integer.named('fluorescence_1_excite_pin').using(optional=True,
                                                          default=6),
         Integer.named('fluorescence_2_excite_pin').using(optional=True,
-                                                         default=7),
+                                                         default=9),
     )
 
     '''
@@ -93,36 +99,46 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
     StepFields = Form.of(
         # Absorbance detector settings
         Integer.named('absorbance_sample_count')
-        .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)]),
+        .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)],
+               properties={'title': 'Abs samples'}),
         Integer.named('absorbance_sample_duration_ms')
         .using(default=1000, optional=True,
-               validators=[ValueAtLeast(minimum=0)]),
+               validators=[ValueAtLeast(minimum=0)],
+               properties={'title': 'Abs ms'}),
         Float.named('absorbance_excitation_intensity')
         .using(default=23, optional=True,
-               validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)]),
+               validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)],
+               properties={'title': 'Abs %'}),
         # Fluorescence detector 1 settings
         Integer.named('fluorescence_1_sample_count')
-        .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)]),
+        .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)],
+               properties={'title': 'Fl1 samples'}),
         Integer.named('fluorescence_1_sample_duration_ms')
         .using(default=1000, optional=True,
-               validators=[ValueAtLeast(minimum=0)]),
+               validators=[ValueAtLeast(minimum=0)],
+               properties={'title': 'Fl1 ms'}),
         Float.named('fluorescence_1_excitation_intensity')
         .using(default=100, optional=True,
-               validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)]),
+               validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)],
+               properties={'title': 'Fl1 %'}),
         # Fluorescence detector 2 settings
         Integer.named('fluorescence_2_sample_count')
-        .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)]),
+        .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)],
+               properties={'title': 'Fl2 samples'}),
         Integer.named('fluorescence_2_sample_duration_ms')
         .using(default=1000, optional=True,
-               validators=[ValueAtLeast(minimum=0)]),
+               validators=[ValueAtLeast(minimum=0)],
+               properties={'title': 'Fl2 ms'}),
         Float.named('fluorescence_2_excitation_intensity')
         .using(default=100, optional=True,
-               validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)]),
+               validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)],
+               properties={'title': 'Fl2 %'}),
     )
 
     def __init__(self):
         self.name = self.plugin_name
         self.proxy = None
+        self.control_board_timeout_id = None
 
     def verify_connected(self):
         if self.proxy is None:
@@ -131,6 +147,8 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
                 logger.info('[OpticalDetectorPlugin] proxy connected')
             except (Exception, ), exception:
                 warnings.warn(str(exception))
+                logger.warning('[OpticalDetectorPlugin] could not connect to '
+                               'pulse counter')
                 return False
         return True
 
@@ -139,8 +157,9 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         Returns a list of scheduling requests (i.e., ScheduleRequest
         instances) for the function specified by function_name.
         """
-        if function_name in ['on_step_options_swapped']:
-            return [ScheduleRequest('wheelerlab.dmf_control_board', self.name)]
+        if function_name in ['on_step_run']:
+            # Execute `on_step_run` before control board.
+            return [ScheduleRequest(self.name, 'wheelerlab.dmf_control_board')]
         return []
 
     def on_plugin_disable(self):
@@ -150,6 +169,7 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         if self.proxy is not None:
             del self.proxy
             self.proxy = None
+            logger.info('[OpticalDetectorPlugin] disconnected from proxy')
 
     def on_plugin_enable(self):
         """
@@ -171,29 +191,8 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         """
         Handler called when a protocol starts running.
         """
-        pass
-
-    def on_step_options_swapped(self, plugin, old_step_number, step_number):
-        """
-        Handler called when the step options are changed for a particular
-        plugin.  This will, for example, allow for GUI elements to be
-        updated based on step specified.
-
-        Parameters:
-            plugin : plugin instance for which the step options changed
-            step_number : step number that the options changed for
-        """
-        if self.verify_connected():
-            app = get_app()
-            app_values = self.get_app_values()
-            options = self.get_step_options(step_number=step_number)
-
-            step_results = {}
-
-            for k in ['absorbance', 'fluorescence_1', 'fluorescence_2']:
-                step_results[k] = self.measure_pulses(k, app_values, options)
-
-            app.experiment_log.add_data(step_results, self.name)
+        if not self.verify_connected():
+            logger.warning("Warning: No pulse counter device connection.")
 
     def measure_pulses(self, detector_name, app_values, step_options):
         '''
@@ -238,29 +237,91 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
             'Repeat' - repeat the step
             or 'Fail' - unrecoverable error (stop the protocol)
         """
-        if self.verify_connected():
-            # Connected to pulse counter, so measure
-            app = get_app()
+        self._kill_running_step()
+
+        # At start of step, set flag to indicate that we are waiting for the
+        # control board to complete the current step before acquiring
+        # measurements.
+        self.control_board_step_complete = False
+
+        # Record current time to enable timeout if the control board takes too
+        # long.
+        self.start_time = datetime.now()
+
+        # Schedule check to see if control board has completed current step.
+        gtk.idle_add(self._wait_for_control_board)
+        self.control_board_timeout_id = \
+            gobject.timeout_add(100, self._wait_for_control_board, True)
+
+    def _kill_running_step(self):
+        if self.control_board_timeout_id is not None:
+            gobject.source_remove(self.control_board_timeout_id)
+            self.control_board_timeout_id = None
+
+    def _wait_for_control_board(self, continue_=False):
+        '''
+        After control board has completed current step, measure pulse counts
+        and save to experiment log.
+
+        Args:
+
+            continue_ (bool) : Value to return if control board has not
+                completed current step.  This can be used, for example, to
+                repeat as a scheduled timeout callback.
+
+        Returns:
+
+            (bool) : `False` if step is complete; value of `continue_`
+                otherwise.
+        '''
+        if not self.control_board_step_complete:
+            # Control board has not completed current step.
             app_values = self.get_app_values()
-            options = self.get_step_options()
+            timeout = app_values['dmf_control_timeout_ms']
+            if timeout > 0 and timeout < (datetime.now() -
+                                          self.start_time).total_seconds():
+                # Timed out waiting for control board.
+                emit_signal('on_step_complete', [self.name, 'Fail'])
+                return False
+            return continue_
+        else:
+            self._kill_running_step()
 
-            step_results = []
+            if self.verify_connected():
+                self.count_pulses_and_log()
 
-            for k in ['absorbance', 'fluorescence_1', 'fluorescence_2']:
-                if options[k + '_sample_count']:
-                    results = self.measure_pulses(k, app_values, options)
-                    step_results.extend(results)
+            # Signal step completion.
+            emit_signal('on_step_complete', [self.name, None])
+            return False
 
+    def count_pulses_and_log(self):
+        # Connected to pulse counter, so measure
+        app = get_app()
+        app_values = self.get_app_values()
+        options = self.get_step_options()
+
+        step_results = []
+
+        for k in ['absorbance', 'fluorescence_1', 'fluorescence_2']:
+            if options[k + '_sample_count']:
+                results = self.measure_pulses(k, app_values, options)
+                step_results.extend(results)
+
+        if step_results:
             # Create data frame containing all sample results from current step
             df_results = pd.DataFrame(step_results, columns=['detector',
                                                              'sample_i',
                                                              'intensity',
                                                              'duration_ms',
                                                              'pulse_count'])
-            app.experiment_log.add_data(df_results, self.name)
+            app.experiment_log.add_data({'pulse_counts': df_results}, self.name)
 
-        # Signal step completion.
-        emit_signal('on_step_complete', [self.name, None])
-
+    def on_step_complete(self, plugin_name, return_value=None):
+        if return_value is None and (plugin_name ==
+                                     'wheelerlab.dmf_control_board'):
+            logger.info('Control board has completed step.')
+            # Set flag to indicate that control board has completed current
+            # step.
+            self.control_board_step_complete = True
 
 PluginGlobals.pop_env()

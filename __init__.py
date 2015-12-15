@@ -17,6 +17,7 @@ You should have received a copy of the GNU General Public License
 along with optical_detector_plugin.  If not, see <http://www.gnu.org/licenses/>.
 """
 import warnings
+import logging
 
 import pandas as pd
 from path_helpers import path
@@ -28,7 +29,8 @@ from microdrop.plugin_helpers import (AppDataController, StepOptionsController,
 from microdrop.plugin_manager import (PluginGlobals, Plugin, IPlugin,
                                       ScheduleRequest, implements, emit_signal)
 from microdrop.app_context import get_app
-from microdrop.logger import logger
+
+logger = logging.getLogger(__name__)
 
 
 PluginGlobals.push_env('microdrop.managed')

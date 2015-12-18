@@ -1,1 +1,1 @@
-analyst-remote-control
+pulse-counter-rpc>=0.1.post19

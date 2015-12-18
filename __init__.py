@@ -19,19 +19,27 @@ along with optical_detector_plugin.  If not, see <http://www.gnu.org/licenses/>.
 import warnings
 import logging
 from datetime import datetime
+import time
 
+from flatland import Form, Integer, Float
+from flatland.validation import ValueAtLeast, ValueAtMost
+from path_helpers import path
+from pulse_counter_rpc import SerialProxy
+from pygtkhelpers.ui.extra_widgets import Filepath
+from pygtkhelpers.ui.form_view_dialog import FormViewDialog
+from pygtkhelpers.ui.objectlist import PropertyMapper
 import gobject
 import gtk
 import pandas as pd
-from path_helpers import path
-from pulse_counter_rpc import SerialProxy
-from flatland import Form, Integer, Float
-from flatland.validation import ValueAtLeast, ValueAtMost
+import numpy as np
 from microdrop.plugin_helpers import (AppDataController, StepOptionsController,
                                       get_plugin_info)
 from microdrop.plugin_manager import (PluginGlobals, Plugin, IPlugin,
-                                      ScheduleRequest, implements, emit_signal)
+                                      IWaveformGenerator, ScheduleRequest,
+                                      implements, emit_signal,
+                                      get_service_instance_by_name)
 from microdrop.app_context import get_app
+from microdrop.protocol import Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -69,15 +77,16 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         # Pulse counting pin
         Integer.named('pulse_count_pin').using(optional=True, default=2),
         # Multiplexer channels
-        Integer.named('absorbance_channel').using(optional=True, default=0),
+        Integer.named('absorbance_channel').using(optional=True, default=1),
         Integer.named('fluorescence_1_channel').using(optional=True,
-                                                      default=1),
-        Integer.named('fluorescence_2_channel').using(optional=True,
                                                       default=2),
+        Integer.named('fluorescence_2_channel').using(optional=True,
+                                                      default=3),
         # Excitation pins (e.g., LED control)
-        Integer.named('absorbance_excite_pin').using(optional=True, default=5),
+        Integer.named('absorbance_excite_pin').using(optional=True,
+                                                     default=10),
         Integer.named('fluorescence_1_excite_pin').using(optional=True,
-                                                         default=6),
+                                                         default=5),
         Integer.named('fluorescence_2_excite_pin').using(optional=True,
                                                          default=9),
     )
@@ -96,6 +105,15 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
             (unless properties=dict(show_in_gui=False) is used)
         -the values of these fields will be stored persistently for each step
     '''
+    # Create `PropertyMapper` instances to only make step option columns
+    # editable if the number of sample counts is greater than 0 for the
+    # corresponding detector.
+    active_mappers = dict([(k, [PropertyMapper(a, attr=k + '_sample_count',
+                                               format_func=lambda v: v > 0)
+                                for a in ['sensitive', 'editable']])
+                           for k in ['absorbance', 'fluorescence_1',
+                                     'fluorescence_2']])
+
     StepFields = Form.of(
         # Absorbance detector settings
         Integer.named('absorbance_sample_count')
@@ -104,11 +122,17 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         Integer.named('absorbance_sample_duration_ms')
         .using(default=1000, optional=True,
                validators=[ValueAtLeast(minimum=0)],
-               properties={'title': 'Abs ms'}),
+               properties={'title': 'Abs ms',
+                           'mappers': active_mappers['absorbance']}),
         Float.named('absorbance_excitation_intensity')
         .using(default=23, optional=True,
                validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)],
-               properties={'title': 'Abs %'}),
+               properties={'title': 'Abs %',
+                           'mappers': active_mappers['absorbance']}),
+        Float.named('absorbance_threshold')
+        .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)],
+               properties={'title': 'Abs threshold',
+                           'mappers': active_mappers['absorbance']}),
         # Fluorescence detector 1 settings
         Integer.named('fluorescence_1_sample_count')
         .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)],
@@ -116,11 +140,13 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         Integer.named('fluorescence_1_sample_duration_ms')
         .using(default=1000, optional=True,
                validators=[ValueAtLeast(minimum=0)],
-               properties={'title': 'Fl1 ms'}),
+               properties={'title': 'Fl1 ms',
+                           'mappers': active_mappers['fluorescence_1']}),
         Float.named('fluorescence_1_excitation_intensity')
         .using(default=100, optional=True,
                validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)],
-               properties={'title': 'Fl1 %'}),
+               properties={'title': 'Fl1 %',
+                           'mappers': active_mappers['fluorescence_1']}),
         # Fluorescence detector 2 settings
         Integer.named('fluorescence_2_sample_count')
         .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)],
@@ -128,17 +154,21 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         Integer.named('fluorescence_2_sample_duration_ms')
         .using(default=1000, optional=True,
                validators=[ValueAtLeast(minimum=0)],
-               properties={'title': 'Fl2 ms'}),
+               properties={'title': 'Fl2 ms',
+                           'mappers': active_mappers['fluorescence_2']}),
         Float.named('fluorescence_2_excitation_intensity')
         .using(default=100, optional=True,
                validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)],
-               properties={'title': 'Fl2 %'}),
+               properties={'title': 'Fl2 %',
+                           'mappers': active_mappers['fluorescence_2']}),
     )
 
     def __init__(self):
         self.name = self.plugin_name
+        self.control_board = None
         self.proxy = None
         self.control_board_timeout_id = None
+        self.initialized = False
 
     def verify_connected(self):
         if self.proxy is None:
@@ -147,8 +177,8 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
                 logger.info('[OpticalDetectorPlugin] proxy connected')
             except (Exception, ), exception:
                 warnings.warn(str(exception))
-                logger.warning('[OpticalDetectorPlugin] could not connect to '
-                               'pulse counter')
+                logger.info('[OpticalDetectorPlugin] proxy connected',
+                            exc_info=True)
                 return False
         return True
 
@@ -171,6 +201,40 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
             self.proxy = None
             logger.info('[OpticalDetectorPlugin] disconnected from proxy')
 
+    def _create_menu(self):
+        app = get_app()
+        self.od_sensor_menu_item = gtk.MenuItem('OD threshold events')
+        app.main_window_controller.menu_tools.append(self.od_sensor_menu_item)
+        self.od_sensor_menu_item.connect('activate',
+                                         self.on_edit_od_threshold_events)
+        self.od_sensor_menu_item.show()
+
+    def on_edit_od_threshold_events(self, widget, data=None):
+        """
+        Handler called when the user clicks on "Edit OD threshold events" in
+        the "Tools" menu.
+        """
+        app = get_app()
+        options = self.get_step_options()
+        form = Form.of(*[Filepath.named(k).using(default=options.get(k, None),
+                                                 optional=True)
+                         for k in ('under_threshold_subprotocol',
+                                   'over_threshold_subprotocol')])
+        dialog = FormViewDialog()
+        valid, response =  dialog.run(form)
+
+        step_options_changed = False
+        if valid:
+            for k in ('under_threshold_subprotocol',
+                      'over_threshold_subprotocol'):
+                if response[k] and response[k] != options.get(k, None):
+                    options[k] = response[k]
+                    step_options_changed = True
+        if step_options_changed:
+            emit_signal('on_step_options_changed',
+                        [self.name, app.protocol.current_step_number],
+                        interface=IPlugin)
+
     def on_plugin_enable(self):
         """
         Handler called once the plugin instance is enabled.
@@ -184,7 +248,20 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
 
         to retain this functionality.
         """
-        self.verify_connected()
+        # get a reference to the control board
+        if self.control_board is None:
+            try:
+                plugin = get_service_instance_by_name('wheelerlab'
+                                                      '.dmf_control_board')
+            except:
+                logging.warning('Could not get connection to control board.')
+            else:
+                self.control_board = plugin.control_board
+        if not self.verify_connected():
+            logger.warning('[OpticalDetectorPlugin] could not connect to '
+                           'pulse counter')
+        self._create_menu()
+        self.initialized = True
         super(OpticalDetectorPlugin, self).on_plugin_enable()
 
     def on_protocol_run(self):
@@ -216,7 +293,8 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
                 app_values[detector_name + '_channel'],
                 duration_ms,
                 timeout_s=3 * duration_ms)
-            results.append([detector_name, i, intensity, duration_ms, result])
+            results.append([datetime.now(), detector_name, i, intensity,
+                            duration_ms, result])
 
         # Turn off excitation
         self.proxy.analog_write(app_values[detector_name + '_excite_pin'], 0)
@@ -288,11 +366,73 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
             self._kill_running_step()
 
             if self.verify_connected():
-                self.count_pulses_and_log()
+                df_results = self.count_pulses_and_log()
+                print df_results
+                if df_results is not None:
+                    df_absorbance = df_results.loc[df_results.detector ==
+                                                   'absorbance']
+                    if df_absorbance.shape[0] > 0:
+                        # TODO For now, we're actually setting threshold based
+                        # on *intensity*.
+                        absorbance = (df_absorbance.pulse_count /
+                                      df_absorbance.duration_ms *
+                                      1e-3).median()
+                        try:
+                            self.process_absorbance(absorbance)
+                        except IOError:
+                            logging.error('Cannot process absorbance '
+                                          'measurement.', exc_info=True)
 
             # Signal step completion.
             emit_signal('on_step_complete', [self.name, None])
             return False
+
+    def process_absorbance(self, absorbance):
+        if self.control_board is None or not self.control_board.connected():
+            #raise IOError('No control board connection.')
+            warnings.warn('No control board connection.')
+
+        options = self.get_step_options()
+        sub_protocol = []
+        if absorbance >= options['absorbance_threshold']:
+            sub_protocol_path = options.get('over_threshold_subprotocol', None)
+            if sub_protocol_path:
+                logger.info('[ODSensorPlugin] absorbance >= threshold, run '
+                            'subprotocol %s' % sub_protocol_path)
+                sub_protocol = Protocol.load(sub_protocol_path)
+        else:
+            sub_protocol_path = options.get('under_threshold_subprotocol',
+                                            None)
+            if sub_protocol_path:
+                logger.info('[ODSensorPlugin] absorbance < threshold, run '
+                            'subprotocol %s' % sub_protocol_path)
+                sub_protocol = Protocol.load(sub_protocol_path)
+
+        # Execute all steps in sub protocol
+        for i, step in enumerate(sub_protocol):
+            logger.info('[ODSensorPlugin] subprotocol step %d' % i)
+            # TODO No true sub protocol support.  For now, just hijack control
+            # board and set voltage, frequency and channel states directly.
+            dmf_options = step.get_data('microdrop.gui.dmf_device_controller')
+            options = step.get_data('wheelerlab.dmf_control_board')
+
+            state = dmf_options.state_of_channels
+            max_channels = self.control_board.number_of_channels()
+
+            if len(state) >  max_channels:
+                state = state[0:max_channels]
+            elif len(state) < max_channels:
+                state = np.concatenate([state,
+                        np.zeros(max_channels - len(state), int)])
+            else:
+                assert(len(state) == max_channels)
+
+            emit_signal("set_voltage", options.voltage,
+                        interface=IWaveformGenerator)
+            emit_signal("set_frequency", options.frequency,
+                        interface=IWaveformGenerator)
+            self.control_board.set_state_of_all_channels(state)
+            time.sleep(options.duration * 1e-3)
 
     def count_pulses_and_log(self):
         # Connected to pulse counter, so measure
@@ -309,12 +449,14 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
 
         if step_results:
             # Create data frame containing all sample results from current step
-            df_results = pd.DataFrame(step_results, columns=['detector',
+            df_results = pd.DataFrame(step_results, columns=['timestamp',
+                                                             'detector',
                                                              'sample_i',
                                                              'intensity',
                                                              'duration_ms',
                                                              'pulse_count'])
             app.experiment_log.add_data({'pulse_counts': df_results}, self.name)
+            return df_results
 
     def on_step_complete(self, plugin_name, return_value=None):
         if return_value is None and (plugin_name ==

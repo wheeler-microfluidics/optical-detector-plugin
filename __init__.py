@@ -75,20 +75,18 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         Integer.named('dmf_control_timeout_ms').using(optional=True,
                                                       default=5000),
         # Pulse counting pin
-        Integer.named('pulse_count_pin').using(optional=True, default=2),
+        Integer.named('absorbance_count_pin').using(optional=True, default=2),
+        Integer.named('fluorescence_1_count_pin').using(optional=True,
+                                                        default=3),
         # Multiplexer channels
         Integer.named('absorbance_channel').using(optional=True, default=1),
         Integer.named('fluorescence_1_channel').using(optional=True,
                                                       default=2),
-        Integer.named('fluorescence_2_channel').using(optional=True,
-                                                      default=3),
         # Excitation pins (e.g., LED control)
         Integer.named('absorbance_excite_pin').using(optional=True,
                                                      default=10),
         Integer.named('fluorescence_1_excite_pin').using(optional=True,
                                                          default=5),
-        Integer.named('fluorescence_2_excite_pin').using(optional=True,
-                                                         default=9),
     )
 
     '''
@@ -111,8 +109,7 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
     active_mappers = dict([(k, [PropertyMapper(a, attr=k + '_sample_count',
                                                format_func=lambda v: v > 0)
                                 for a in ['sensitive', 'editable']])
-                           for k in ['absorbance', 'fluorescence_1',
-                                     'fluorescence_2']])
+                           for k in ['absorbance', 'fluorescence_1']])
 
     StepFields = Form.of(
         # Absorbance detector settings
@@ -147,20 +144,6 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
                validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)],
                properties={'title': 'Fl1 %',
                            'mappers': active_mappers['fluorescence_1']}),
-        # Fluorescence detector 2 settings
-        Integer.named('fluorescence_2_sample_count')
-        .using(default=0, optional=True, validators=[ValueAtLeast(minimum=0)],
-               properties={'title': 'Fl2 samples'}),
-        Integer.named('fluorescence_2_sample_duration_ms')
-        .using(default=1000, optional=True,
-               validators=[ValueAtLeast(minimum=0)],
-               properties={'title': 'Fl2 ms',
-                           'mappers': active_mappers['fluorescence_2']}),
-        Float.named('fluorescence_2_excitation_intensity')
-        .using(default=100, optional=True,
-               validators=[ValueAtLeast(minimum=0), ValueAtMost(maximum=100)],
-               properties={'title': 'Fl2 %',
-                           'mappers': active_mappers['fluorescence_2']}),
     )
 
     def __init__(self):
@@ -289,7 +272,7 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
         for i in xrange(step_options[detector_name + '_sample_count']):
             # Take measurement
             result = self.proxy.count_pulses(
-                app_values['pulse_count_pin'],
+                app_values[detector_name + '_count_pin'],
                 app_values[detector_name + '_channel'],
                 duration_ms)
             results.append([datetime.now(), detector_name, i, intensity,
@@ -441,7 +424,7 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
 
         step_results = []
 
-        for k in ['absorbance', 'fluorescence_1', 'fluorescence_2']:
+        for k in ['absorbance', 'fluorescence_1']:
             if options[k + '_sample_count']:
                 results = self.measure_pulses(k, app_values, options)
                 step_results.extend(results)

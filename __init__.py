@@ -291,8 +291,7 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
             result = self.proxy.count_pulses(
                 app_values['pulse_count_pin'],
                 app_values[detector_name + '_channel'],
-                duration_ms,
-                timeout_s=3 * duration_ms)
+                duration_ms)
             results.append([datetime.now(), detector_name, i, intensity,
                             duration_ms, result])
 

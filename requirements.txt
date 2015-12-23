@@ -1,1 +1,1 @@
-pulse-counter-rpc>=0.1.post19
+pulse-counter-rpc>=0.1.post22

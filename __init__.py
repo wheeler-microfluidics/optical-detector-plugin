@@ -416,6 +416,7 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
                         interface=IWaveformGenerator)
 
             if options.feedback_options.feedback_enabled:
+                logger.info('[OpticalDetectorPlugin] run step with feedback enabled.')
                 app = get_app()
                 fb_options = app.config.data['wheelerlab.dmf_control_board']
                 control_board_plugin = get_service_instance_by_name('wheelerlab.dmf_control_board')
@@ -436,10 +437,12 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
                     self.control_board.measure_impedance(
                         sampling_window_ms,
                         n_sampling_windows,
+                        delay_between_windows_ms,
                         fb_options['interleave_feedback_samples'],
                         fb_options['use_rms'],
                         state)
             else:
+                logger.info('[OpticalDetectorPlugin] run step without feedback.')
                 self.control_board.set_state_of_all_channels(state)
                 time.sleep(options.duration * 1e-3)
 

@@ -20,6 +20,7 @@ import warnings
 import logging
 from datetime import datetime
 import time
+import math
 
 from flatland import Form, Integer, Float
 from flatland.validation import ValueAtLeast, ValueAtMost
@@ -413,8 +414,34 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
                         interface=IWaveformGenerator)
             emit_signal("set_frequency", options.frequency,
                         interface=IWaveformGenerator)
-            self.control_board.set_state_of_all_channels(state)
-            time.sleep(options.duration * 1e-3)
+
+            if options.feedback_options.feedback_enabled:
+                app = get_app()
+                fb_options = app.config.data['wheelerlab.dmf_control_board']
+                control_board_plugin = get_service_instance_by_name('wheelerlab.dmf_control_board')
+                delay_between_windows_ms = fb_options['delay_between_windows_ms']
+                sampling_window_ms = fb_options['sampling_window_ms']
+
+                n_sampling_windows = int(math.ceil(options.duration /
+                                         (sampling_window_ms + \
+                                         delay_between_windows_ms)))
+
+                # call a wrapper function to adjust the delay between sampling windows if
+                # necessary to avoid exceeding the maximum serial buffer length
+                n_sampling_windows, delay_between_windows_ms = \
+                    control_board_plugin._check_n_sampling_windows(sampling_window_ms,
+                                                                   n_sampling_windows,
+                                                                   delay_between_windows_ms)
+                results = \
+                    self.control_board.measure_impedance(
+                        sampling_window_ms,
+                        n_sampling_windows,
+                        fb_options['interleave_feedback_samples'],
+                        fb_options['use_rms'],
+                        state)
+            else:
+                self.control_board.set_state_of_all_channels(state)
+                time.sleep(options.duration * 1e-3)
 
     def count_pulses_and_log(self):
         # Connected to pulse counter, so measure

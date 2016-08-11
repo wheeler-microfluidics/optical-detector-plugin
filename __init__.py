@@ -204,8 +204,8 @@ class OpticalDetectorPlugin(Plugin, AppDataController, StepOptionsController):
                                                  optional=True)
                          for k in ('under_threshold_subprotocol',
                                    'over_threshold_subprotocol')])
-        dialog = FormViewDialog()
-        valid, response =  dialog.run(form)
+        dialog = FormViewDialog(form)
+        valid, response =  dialog.run()
 
         step_options_changed = False
         if valid:

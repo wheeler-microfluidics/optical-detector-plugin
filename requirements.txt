@@ -1,2 +1,2 @@
-wheeler.pygtkhelpers>=0.11.post3
+wheeler.pygtkhelpers>=0.13.post12
 pulse-counter-rpc>=0.1.post22

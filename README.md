@@ -1,4 +1,3 @@
-![https://ci.appveyor.com/api/projects/status/github/wheeler-microfluidics/optical-detector-plugin?branch=master&svg=true](https://ci.appveyor.com/api/projects/status/github/wheeler-microfluidics/optical-detector-plugin?branch=master&svg=true)
 # optical-detector-plugin
 
 This is a MicroDrop plugin for collecting optical density (OD) and fluorescence readings using an Arduino-based [pulse counter](https://github.com/wheeler-microfluidics/pulse-counter-rpc) and a light-intensity-to-frequency IC (e.g., TSL230R).
